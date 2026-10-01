@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""PyModoro - un cronómetro de cuenta regresiva simple para la terminal.
+"""PyModoro - ciclo Pomodoro para la terminal.
 
 Uso:
-    pymodoro 10m        # 10 minutos
-    pymodoro 30s        # 30 segundos
-    pymodoro 1h         # 1 hora
-    pymodoro 1h30m      # 1 hora y 30 minutos
-    pymodoro 25m -l "Enfoque"   # con etiqueta
-    pymodoro 90         # numero sin sufijo = minutos
+    pymodoro start      # ciclo Pomodoro completo (4x trabajo + descansos) en bucle
+    pymodoro start -q   # sin alerta sonora entre fases
+
+El ciclo son 4 bloques de trabajo de 25m. Tras los 3 primeros hay un descanso
+de 5m; tras el cuarto, un descanso largo de 15m. Luego vuelve a empezar.
+Se detiene con Ctrl+C.
 """
 import argparse
-import re
 import sys
 import time
 
@@ -23,30 +22,30 @@ YELLOW = "\033[93m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
+# Fuente ASCII de dígitos grandes (5 filas de alto)
+DIGITOS_GRANDES = {
+    "0": [" ███ ", "█   █", "█   █", "█   █", " ███ "],
+    "1": ["  █  ", " ██  ", "  █  ", "  █  ", " ███ "],
+    "2": [" ███ ", "█   █", "  ██ ", " █   ", "█████"],
+    "3": ["████ ", "    █", " ███ ", "    █", "████ "],
+    "4": ["█   █", "█   █", "█████", "    █", "    █"],
+    "5": ["█████", "█    ", "████ ", "    █", "████ "],
+    "6": [" ███ ", "█    ", "████ ", "█   █", " ███ "],
+    "7": ["█████", "    █", "   █ ", "  █  ", " █   "],
+    "8": [" ███ ", "█   █", " ███ ", "█   █", " ███ "],
+    "9": [" ███ ", "█   █", " ████", "    █", " ███ "],
+    ":": ["   ", " █ ", "   ", " █ ", "   "],
+}
+ALTO_DIGITO = 5
 
-def parse_duration(texto):
-    """Convierte una cadena como '1h30m', '10m', '45s' o '90' a segundos."""
-    texto = texto.strip().lower()
-    if not texto:
-        raise ValueError("duracion vacia")
 
-    # Un numero puro se interpreta como minutos
-    if re.fullmatch(r"\d+", texto):
-        return int(texto) * 60
-
-    patron = re.findall(r"(\d+)\s*([hms])", texto)
-    if not patron:
-        raise ValueError(f"no se pudo interpretar la duracion: '{texto}'")
-
-    # Verifica que no haya texto sobrante que no coincida
-    if re.sub(r"\d+\s*[hms]", "", texto).strip():
-        raise ValueError(f"formato invalido: '{texto}'")
-
-    unidades = {"h": 3600, "m": 60, "s": 1}
-    total = sum(int(valor) * unidades[unidad] for valor, unidad in patron)
-    if total <= 0:
-        raise ValueError("la duracion debe ser mayor que cero")
-    return total
+def render_grande(texto):
+    """Convierte una cadena como '12:34' en una lista de 5 lineas ASCII grandes."""
+    filas = []
+    for i in range(ALTO_DIGITO):
+        partes = [DIGITOS_GRANDES.get(c, "     ")[i] for c in texto]
+        filas.append(" ".join(partes))
+    return filas
 
 
 def formato_hms(segundos):
@@ -66,10 +65,17 @@ def barra_progreso(transcurrido, total, ancho=30):
 
 
 def cuenta_regresiva(total_segundos, etiqueta=None):
-    """Ejecuta la cuenta regresiva mostrando el tiempo restante."""
+    """Ejecuta la cuenta regresiva mostrando el tiempo restante en grande."""
     inicio = time.monotonic()
     fin = inicio + total_segundos
     titulo = f" {etiqueta}" if etiqueta else ""
+
+    # El bloque dibujado ocupa: 1 cabecera + ALTO_DIGITO + 1 barra = filas totales
+    filas_bloque = ALTO_DIGITO + 2
+    primera_vez = True
+
+    # Oculta el cursor durante la cuenta
+    sys.stdout.write("\033[?25l")
 
     try:
         while True:
@@ -80,21 +86,38 @@ def cuenta_regresiva(total_segundos, etiqueta=None):
             restante_ent = int(restante + 0.5)
             transcurrido = total_segundos - restante
             barra = barra_progreso(transcurrido, total_segundos)
-            linea = (
-                f"\r{CYAN}{BOLD}PyModoro{RESET}{titulo}  "
-                f"{GREEN}{formato_hms(restante_ent)}{RESET}  "
-                f"{YELLOW}{barra}{RESET}"
-            )
-            sys.stdout.write(linea)
+            reloj = render_grande(formato_hms(restante_ent))
+
+            if not primera_vez:
+                # Sube el cursor para redibujar sobre el bloque anterior
+                sys.stdout.write(f"\033[{filas_bloque}A")
+            primera_vez = False
+
+            cabecera = f"{CYAN}{BOLD}PyModoro{RESET}{titulo}"
+            lineas = [cabecera]
+            lineas += [f"{GREEN}{BOLD}{fila}{RESET}" for fila in reloj]
+            lineas.append(f"{YELLOW}{barra}{RESET}")
+
+            # Cada linea limpia hasta el final con \033[K para evitar residuos
+            sys.stdout.write("\r" + "\n".join(f"{l}\033[K" for l in lineas) + "\n")
             sys.stdout.flush()
             # Dormir hasta el proximo segundo entero para una cuenta limpia
             time.sleep(min(1.0, restante - int(restante) or 1.0))
     except KeyboardInterrupt:
+        sys.stdout.write("\033[?25h")  # restaura cursor
         sys.stdout.write("\n" + YELLOW + "Cancelado." + RESET + "\n")
         return False
 
-    sys.stdout.write("\r" + " " * 80 + "\r")
-    sys.stdout.write(f"{GREEN}{BOLD}¡Tiempo!{RESET}{titulo} ({formato_hms(total_segundos)})\n")
+    # Restaura el cursor y muestra el bloque final en cero
+    if not primera_vez:
+        sys.stdout.write(f"\033[{filas_bloque}A")
+    reloj_cero = render_grande(formato_hms(0))
+    cabecera = f"{GREEN}{BOLD}¡Tiempo!{RESET}{titulo}"
+    lineas = [cabecera]
+    lineas += [f"{GREEN}{BOLD}{fila}{RESET}" for fila in reloj_cero]
+    lineas.append(f"{YELLOW}{barra_progreso(1, 1)}{RESET}")
+    sys.stdout.write("\r" + "\n".join(f"{l}\033[K" for l in lineas) + "\n")
+    sys.stdout.write("\033[?25h")  # restaura cursor
     sys.stdout.flush()
     return True
 
@@ -107,35 +130,68 @@ def alerta():
         time.sleep(0.4)
 
 
+# Parametros del ciclo Pomodoro clasico (en minutos)
+TRABAJO_MIN = 25
+DESCANSO_CORTO_MIN = 5
+DESCANSO_LARGO_MIN = 15
+BLOQUES_POR_CICLO = 4
+
+
+def ciclo_pomodoro(silencioso=False):
+    """Ejecuta el ciclo Pomodoro en bucle infinito.
+
+    Cada ciclo son 4 bloques de trabajo de 25m. Tras los 3 primeros hay un
+    descanso corto de 5m; tras el cuarto, un descanso largo de 15m. Luego
+    vuelve a empezar. Se detiene con Ctrl+C.
+    """
+    ciclo = 1
+    try:
+        while True:
+            for bloque in range(1, BLOQUES_POR_CICLO + 1):
+                # Fase de trabajo
+                etiqueta = f"Trabajo {bloque}/{BLOQUES_POR_CICLO} (ciclo {ciclo})"
+                if not cuenta_regresiva(TRABAJO_MIN * 60, etiqueta):
+                    return False
+                if not silencioso:
+                    alerta()
+
+                # Fase de descanso
+                if bloque == BLOQUES_POR_CICLO:
+                    descanso = DESCANSO_LARGO_MIN
+                    etiqueta = f"Descanso largo ({DESCANSO_LARGO_MIN}m)"
+                else:
+                    descanso = DESCANSO_CORTO_MIN
+                    etiqueta = f"Descanso ({DESCANSO_CORTO_MIN}m)"
+                if not cuenta_regresiva(descanso * 60, etiqueta):
+                    return False
+                if not silencioso:
+                    alerta()
+            ciclo += 1
+    except KeyboardInterrupt:
+        sys.stdout.write("\033[?25h")  # restaura cursor
+        sys.stdout.write("\n" + YELLOW + "Ciclo detenido." + RESET + "\n")
+        return False
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="pymodoro",
-        description="Un cronometro de cuenta regresiva para la terminal.",
+        description="Ciclo Pomodoro para la terminal (4x trabajo + descansos, en bucle).",
     )
     parser.add_argument(
-        "duracion",
-        help="Duracion del cronometro, ej: 10m, 30s, 1h, 1h30m, o un numero (minutos).",
+        "comando",
+        choices=["start"],
+        help="start: inicia el ciclo Pomodoro completo en bucle (Ctrl+C para detener).",
     )
     parser.add_argument(
-        "-l", "--etiqueta", default=None, help="Etiqueta opcional para el cronometro."
-    )
-    parser.add_argument(
-        "-q", "--silencioso", action="store_true", help="No sonar la alerta al terminar."
+        "-q", "--silencioso", action="store_true", help="No sonar la alerta entre fases."
     )
     parser.add_argument(
         "-v", "--version", action="version", version=f"%(prog)s {VERSION}"
     )
     args = parser.parse_args(argv)
 
-    try:
-        total = parse_duration(args.duracion)
-    except ValueError as e:
-        parser.error(str(e))
-        return 2
-
-    completado = cuenta_regresiva(total, args.etiqueta)
-    if completado and not args.silencioso:
-        alerta()
+    completado = ciclo_pomodoro(silencioso=args.silencioso)
     return 0 if completado else 130
 
 
